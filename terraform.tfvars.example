@@ -1,0 +1,15 @@
+environment               = "dev"
+project_name              = "my-fullstack-app"
+aws_region                = "us-east-1"
+
+# MongoDB Atlas
+mongodbatlas_public_key   = "your-public-key"
+mongodbatlas_private_key  = "your-private-key"
+mongodbatlas_org_id       = "your-org-id"
+mongodb_password          = "secure-db-password"
+
+# GitHub
+github_repository         = "your-username/your-repo"
+
+# S3
+assets_bucket_name        = "my-app-assets-dev"
