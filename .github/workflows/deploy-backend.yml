@@ -2,52 +2,127 @@ name: Deploy Backend
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, staging]
     paths:
       - 'backend/**'
       - '.github/workflows/deploy-backend.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: your-project-backend-dev
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_NAME }}
+  ENVIRONMENT: ${{ github.ref_name == 'main' && 'prod' || (github.ref_name == 'develop' && 'dev' || 'staging') }}
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  deploy:
+  test:
+    name: Run Tests
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          npm ci
+
+      - name: Run tests
+        run: |
+          cd backend
+          npm test
+        env:
+          NODE_ENV: test
+
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_BACKEND }}
           aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Backend
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Get environment variables from Secrets Manager
         id: secrets
         run: |
-          SECRETS=$(aws secretsmanager get-secret-value --secret-id your-project-backend-env-dev --query SecretString --output text)
-          echo "::add-mask::$SECRETS"
+          SECRET_ID="${{ secrets.PROJECT_NAME }}-backend-env-${{ env.ENVIRONMENT }}"
+          SECRETS=$(aws secretsmanager get-secret-value --secret-id $SECRET_ID --query SecretString --output text)
+          
+          # Create .env file for build
+          echo "$SECRETS" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' > backend/.env
+          
+          # Set outputs for later steps
           echo "secrets=$SECRETS" >> $GITHUB_OUTPUT
+          
+          # Extract specific values for GitHub outputs
+          echo "mongodb_uri=$(echo $SECRETS | jq -r '.MONGODB_URI')" >> $GITHUB_OUTPUT
+          
+          # Mask sensitive values
+          echo "::add-mask::$(echo $SECRETS | jq -r '.MONGODB_URI')"
 
-      - name: Build, tag, and push image to Amazon ECR
+      - name: Build Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           cd backend
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY --all-tags
+          docker build \
+            --build-arg NODE_ENV=${{ env.ENVIRONMENT }} \
+            --build-arg MONGODB_URI="${{ steps.secrets.outputs.mongodb_uri }}" \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
 
-      # Add ECS deployment steps here if using ECS
+      - name: Push Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Update ECS service (if using ECS)
+        if: false  # Set to true if using ECS
+        run: |
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER_NAME }} \
+            --service ${{ secrets.ECS_SERVICE_NAME }} \
+            --force-new-deployment
+
+      - name: Notify deployment status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Backend deployed successfully to ${{ env.ENVIRONMENT }}"
+          else
+            echo "❌ Backend deployment failed"
+            exit 1
+          fi
