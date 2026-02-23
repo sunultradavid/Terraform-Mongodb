@@ -1,6 +1,6 @@
 environment               = "dev"
 project_name              = "my-fullstack-app"
-aws_region                = "us-east-1"
+aws_region                = "eu-west-1"
 
 # MongoDB Atlas
 mongodbatlas_public_key   = "your-public-key"
