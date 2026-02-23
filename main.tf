@@ -20,7 +20,7 @@ terraform {
   backend "s3" {
     bucket         = "your-terraform-state-bucket"
     key            = "fullstack-app/terraform.tfstate"
-    region         = "us-east-1"
+    region         = "eu-west-1"
     encrypt        = true
     dynamodb_table = "terraform-state-lock"
   }
